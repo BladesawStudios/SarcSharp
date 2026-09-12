@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SarcSharp</RootNamespace>
+    <AssemblyName>SarcSharp</AssemblyName>
+    <Version>0.1.0</Version>
+    <Description>Reader and writer for the SARC archive format used by recent Nintendo titles.</Description>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+  </PropertyGroup>
+
+</Project>
