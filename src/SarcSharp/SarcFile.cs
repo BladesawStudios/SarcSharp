@@ -3,33 +3,12 @@ using System.Text;
 
 namespace SarcSharp;
 
-/// <summary>One file inside an archive.</summary>
-/// <param name="Name">The path within the archive, with forward slashes.</param>
-/// <param name="Data">The file's bytes.</param>
-/// <param name="Alignment">
-/// What the file's offset must be a multiple of, for content the game maps in place rather
-/// than copies.
-///
-/// This is not recovered when reading, because it cannot be: all a read can see is what the
-/// offset happens to divide by, which is mostly luck. Measured across a hundred and thirteen
-/// packs, every contained type with more than a handful of instances sits at 8 - the larger
-/// figures all come from single samples. Set it when writing something that needs more.
-/// </param>
 public sealed record SarcEntry(string Name, byte[] Data, int Alignment = SarcFile.DefaultAlignment);
 
-/// <summary>
-/// A SARC archive: a flat set of named files.
-/// </summary>
-/// <remarks>
-/// Three parts after the header. SFAT lists the files, sorted by a hash of the name so the
-/// game can binary-search them; SFNT holds the names themselves; then the data. A node points
-/// at its name by an index into SFNT and at its bytes by offsets from where the data starts.
-/// </remarks>
 public sealed class SarcFile
 {
     public const int DefaultAlignment = 8;
 
-    /// <summary>The multiplier the name hash uses. Every archive seen uses this.</summary>
     public const uint DefaultHashKey = 0x65;
 
     private const ushort Bom = 0xFEFF;
@@ -41,10 +20,8 @@ public sealed class SarcFile
 
     public List<SarcEntry> Entries { get; } = [];
 
-    /// <summary>The hash multiplier, kept so an archive written back keeps its own.</summary>
     public uint HashKey { get; set; } = DefaultHashKey;
 
-    /// <summary>Whether the archive is stored big endian, which its byte-order mark says.</summary>
     public bool BigEndian { get; set; }
 
     public SarcEntry? this[string name]
@@ -53,16 +30,13 @@ public sealed class SarcFile
     public bool Contains(string name) => this[name] is not null;
 
     // ---- reading ----------------------------------------------------------
-
     public static SarcFile FromFile(string path) => FromBinary(File.ReadAllBytes(path));
 
-    /// <exception cref="InvalidDataException">The data is not a SARC archive.</exception>
     public static SarcFile FromBinary(ReadOnlySpan<byte> data)
     {
         if (data.Length < SarcHeaderSize || !data[..4].SequenceEqual("SARC"u8))
             throw new InvalidDataException("Not a SARC archive.");
 
-        // The byte-order mark is the field that says how to read the rest of them.
         bool big = BinaryPrimitives.ReadUInt16LittleEndian(data[0x06..]) != Bom;
         Reader r = new(data, big);
 
@@ -99,7 +73,6 @@ public sealed class SarcFile
             if (start < 0 || end > data.Length || end < start)
                 throw new InvalidDataException($"SARC entry {i} runs outside the archive.");
 
-            // The top byte flags that the name is present; the rest is its offset in words.
             string name = (attributes >> 24) != 0
                 ? r.StringAt(names + (int)(attributes & 0xFFFFFF) * 4)
                 : $"0x{r.U32(node):X8}";
@@ -116,8 +89,6 @@ public sealed class SarcFile
 
     public byte[] Write()
     {
-        // Sorted by hash: the game binary-searches the table, so the order is not cosmetic.
-        // Names break ties so that the same set always writes the same way.
         List<SarcEntry> sorted = [.. Entries
             .OrderBy(e => Hash(e.Name, HashKey))
             .ThenBy(e => e.Name, StringComparer.Ordinal)];
@@ -127,7 +98,6 @@ public sealed class SarcFile
         int sfnt = nodes + sorted.Count * NodeSize;
         int names = sfnt + SfntHeaderSize;
 
-        // Name offsets are in words, so each name starts on a multiple of four.
         List<int> nameOffsets = new(sorted.Count);
         int nameLength = 0;
         foreach (SarcEntry entry in sorted)
@@ -138,7 +108,6 @@ public sealed class SarcFile
 
         int dataStart = Align(names + nameLength, LargestAlignment(sorted));
 
-        // Lay the files out before writing anything, so the nodes can name their offsets.
         List<(int Start, int End)> spans = new(sorted.Count);
         int at = dataStart;
         foreach (SarcEntry entry in sorted)
@@ -196,13 +165,6 @@ public sealed class SarcFile
 
     private static int Align(int value, int to) => (value + to - 1) / to * to;
 
-    /// <summary>
-    /// The hash a name is filed under.
-    /// </summary>
-    /// <remarks>
-    /// Each character multiplies the running value by the archive's key and adds itself. The
-    /// key is stored per archive, though every one seen uses 0x65.
-    /// </remarks>
     public static uint Hash(string name, uint key = DefaultHashKey)
     {
         uint hash = 0;
