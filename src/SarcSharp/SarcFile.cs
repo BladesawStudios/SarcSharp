@@ -77,7 +77,7 @@ public sealed class SarcFile
                 ? r.StringAt(names + (int)(attributes & 0xFFFFFF) * 4)
                 : $"0x{r.U32(node):X8}";
 
-            archive.Entries.Add(new SarcEntry(name, data[start..end].ToArray()));
+            archive.Entries.Add(new SarcEntry(name, data[start..end].ToArray(), ObservedAlignment(start)));
         }
 
         return archive;
@@ -106,13 +106,13 @@ public sealed class SarcFile
             nameLength = Align(nameLength + Encoding.UTF8.GetByteCount(entry.Name) + 1, 4);
         }
 
-        int dataStart = Align(names + nameLength, LargestAlignment(sorted));
+        int dataStart = Align(names + nameLength, sorted.Count > 0 ? Math.Max(sorted[0].Alignment, MinimumAlignment) : MinimumAlignment);
 
         List<(int Start, int End)> spans = new(sorted.Count);
         int at = dataStart;
         foreach (SarcEntry entry in sorted)
         {
-            at = Align(at, Math.Max(entry.Alignment, DefaultAlignment));
+            at = Align(at, Math.Max(entry.Alignment, MinimumAlignment));
             spans.Add((at, at + entry.Data.Length));
             at += entry.Data.Length;
         }
@@ -155,12 +155,14 @@ public sealed class SarcFile
         return output;
     }
 
-    private static int LargestAlignment(List<SarcEntry> entries)
-    {
-        int largest = DefaultAlignment;
-        foreach (SarcEntry entry in entries) largest = Math.Max(largest, entry.Alignment);
+    private int MinimumAlignment => BigEndian ? 4 : DefaultAlignment;
 
-        return largest;
+    // The alignment an entry was written with is the largest power of two its offset is a multiple of, up to a limit.
+    // Keeping it means an archive written back unchanged lays out its data where it was.
+    private static int ObservedAlignment(int start)
+    {
+        const int Limit = 0x2000;
+        return start == 0 ? Limit : Math.Min(start & -start, Limit);
     }
 
     private static int Align(int value, int to) => (value + to - 1) / to * to;
