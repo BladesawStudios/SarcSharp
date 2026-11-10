@@ -100,4 +100,92 @@ public class SarcTests
         Assert.True(files > 10000, $"Expected the full set of packs, found {files}.");
         Assert.True(failures.IsEmpty, $"{failures.Count} packs differ: {string.Join(", ", failures.Order().Take(10))}");
     }
+
+    [Fact]
+    public void SetReplacesAndRemoveDrops()
+    {
+        SarcFile sarc = new();
+        sarc.Entries.Add(new SarcEntry("a.bin", [1], 32));
+        sarc.Entries.Add(new SarcEntry("b.bin", [2]));
+
+        sarc.Set("a.bin", [9, 9]);
+        Assert.True(sarc.Remove("b.bin"));
+        Assert.False(sarc.Remove("b.bin"));
+
+        SarcFile back = SarcFile.FromBinary(sarc.Write());
+
+        Assert.Equal(1, back.Count);
+        Assert.Equal([9, 9], back["a.bin"]!.Data);
+        Assert.True(back["a.bin"]!.Alignment >= 32);
+    }
+
+    [Fact]
+    public void LookupsSeeEditsMadeThroughEntries()
+    {
+        SarcFile sarc = new();
+        sarc.Entries.Add(new SarcEntry("a.bin", [1]));
+        sarc.Entries.Add(new SarcEntry("b.bin", [2]));
+        Assert.True(sarc.Contains("a.bin"));
+
+        sarc.Entries.Add(new SarcEntry("c.bin", [3]));
+        sarc.Entries[0] = sarc.Entries[0] with { Name = "renamed.bin" };
+        sarc.Entries.RemoveAt(1);
+
+        Assert.Null(sarc["a.bin"]);
+        Assert.Null(sarc["b.bin"]);
+        Assert.Equal([1], sarc["renamed.bin"]!.Data);
+        Assert.Equal([3], sarc["c.bin"]!.Data);
+    }
+
+    [Fact]
+    public void OpenWriteStoresTheDataWhenDisposed()
+    {
+        SarcFile sarc = new();
+
+        using (Stream stream = sarc.OpenWrite("a.bin"))
+        {
+            stream.Write([4, 5, 6]);
+            Assert.False(sarc.Contains("a.bin"));
+        }
+
+        Assert.Equal([4, 5, 6], sarc["a.bin"]!.Data);
+    }
+
+    [Fact]
+    public void ANewFileGetsTheAlignmentItsHeaderAsksFor()
+    {
+        byte[] data = new byte[0x40];
+        "BNTX"u8.CopyTo(data);
+        data[0x0C] = 0xFF;
+        data[0x0D] = 0xFE;
+        data[0x0E] = 12;
+        BitConverter.TryWriteBytes(data.AsSpan(0x1C), data.Length);
+
+        SarcFile sarc = new();
+        sarc.Set("Tex/a.bntx", data);
+        sarc.Set("b.bin", [1, 2, 3]);
+
+        Assert.Equal(0x1000, sarc["Tex/a.bntx"]!.Alignment);
+        Assert.Equal(SarcFile.DefaultAlignment, sarc["b.bin"]!.Alignment);
+    }
+
+    [Fact]
+    public void TryFindPointsAtEachFilesBytes()
+    {
+        SarcFile sarc = new();
+        for (int i = 0; i < 50; i++)
+        {
+            sarc.Entries.Add(new SarcEntry($"Dir/file{i}.bin", Bytes(i + 1, (byte)i)));
+        }
+
+        byte[] archive = sarc.Write();
+
+        for (int i = 0; i < 50; i++)
+        {
+            Assert.True(SarcFile.TryFind(archive, $"Dir/file{i}.bin", out Range range));
+            Assert.Equal(Bytes(i + 1, (byte)i), archive[range]);
+        }
+
+        Assert.False(SarcFile.TryFind(archive, "missing.bin", out _));
+    }
 }

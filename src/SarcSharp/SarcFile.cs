@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using System.Diagnostics.CodeAnalysis;
 
 namespace SarcSharp;
 
@@ -24,10 +25,92 @@ public sealed class SarcFile
 
     public bool BigEndian { get; set; }
 
-    public SarcEntry? this[string name]
-        => Entries.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal));
+    private Dictionary<string, int>? _index;
 
-    public bool Contains(string name) => this[name] is not null;
+    public int Count => Entries.Count;
+
+    public SarcEntry? this[string name]
+    {
+        get
+        {
+            int at = IndexOf(name);
+            return at >= 0 ? Entries[at] : null;
+        }
+    }
+
+    public bool Contains(string name) => IndexOf(name) >= 0;
+
+    public bool TryGet(string name, [NotNullWhen(true)] out SarcEntry? entry)
+    {
+        entry = this[name];
+        return entry is not null;
+    }
+
+    public void Set(string name, byte[] data)
+    {
+        int at = IndexOf(name);
+        int alignment = AlignmentFor(name, data);
+
+        if (at >= 0)
+        {
+            Entries[at] = new SarcEntry(name, data, Math.Max(alignment, Entries[at].Alignment));
+            return;
+        }
+
+        Entries.Add(new SarcEntry(name, data, alignment));
+
+        if (_index is not null)
+        {
+            _index[name] = Entries.Count - 1;
+        }
+    }
+
+    public bool Remove(string name)
+    {
+        int at = IndexOf(name);
+
+        if (at < 0)
+        {
+            return false;
+        }
+
+        Entries.RemoveAt(at);
+        _index = null;
+        return true;
+    }
+
+    public Stream OpenWrite(string name) => new EntryStream(this, name);
+
+    public int IndexOf(string name)
+    {
+        _index ??= BuildIndex();
+
+        if (_index.TryGetValue(name, out int at) && at < Entries.Count && Entries[at].Name == name)
+        {
+            return at;
+        }
+
+        at = Entries.FindIndex(e => e.Name == name);
+
+        if (at >= 0)
+        {
+            _index = BuildIndex();
+        }
+
+        return at;
+    }
+
+    private Dictionary<string, int> BuildIndex()
+    {
+        Dictionary<string, int> index = new(Entries.Count, StringComparer.Ordinal);
+
+        for (int i = 0; i < Entries.Count; i++)
+        {
+            index.TryAdd(Entries[i].Name, i);
+        }
+
+        return index;
+    }
 
     // ---- reading ----------------------------------------------------------
     public static SarcFile FromFile(string path) => FromBinary(File.ReadAllBytes(path));
@@ -83,9 +166,66 @@ public sealed class SarcFile
         return archive;
     }
 
+    public static bool TryFind(ReadOnlySpan<byte> archive, string name, out Range range)
+    {
+        range = default;
+
+        if (archive.Length < SarcHeaderSize || !archive[..4].SequenceEqual("SARC"u8))
+        {
+            throw new InvalidDataException("Not a SARC archive.");
+        }
+
+        bool big = BinaryPrimitives.ReadUInt16LittleEndian(archive[0x06..]) != Bom;
+        Reader r = new(archive, big);
+
+        int dataOffset = (int)r.U32(0x0C);
+        int sfat = r.U16(0x04);
+        int count = r.U16(sfat + 0x06);
+        uint hashKey = r.U32(sfat + 0x08);
+        int nodes = sfat + SfatHeaderSize;
+        int names = nodes + count * NodeSize + SfntHeaderSize;
+
+        uint hash = Hash(name, hashKey);
+
+        int low = 0;
+        int high = count;
+        while (low < high)
+        {
+            int middle = (low + high) / 2;
+
+            if (r.U32(nodes + middle * NodeSize) < hash)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        for (int i = low; i < count && r.U32(nodes + i * NodeSize) == hash; i++)
+        {
+            int node = nodes + i * NodeSize;
+            uint attributes = r.U32(node + 0x04);
+
+            if ((attributes >> 24) != 0 && r.StringAt(names + (int)(attributes & 0xFFFFFF) * 4) != name)
+            {
+                continue;
+            }
+
+            int start = dataOffset + (int)r.U32(node + 0x08);
+            int end = dataOffset + (int)r.U32(node + 0x0C);
+            range = start..end;
+            return true;
+        }
+
+        return false;
+    }
+
     // ---- writing ----------------------------------------------------------
 
     public void WriteTo(string path) => File.WriteAllBytes(path, Write());
+    public void Write(Stream output) => output.Write(Write());
 
     public byte[] Write()
     {
@@ -157,8 +297,41 @@ public sealed class SarcFile
 
     private int MinimumAlignment => BigEndian ? 4 : DefaultAlignment;
 
-    // The alignment an entry was written with is the largest power of two its offset is a multiple of, up to a limit.
-    // Keeping it means an archive written back unchanged lays out its data where it was.
+    public int AlignmentFor(string name, ReadOnlySpan<byte> data)
+    {
+        int alignment = MinimumAlignment;
+        string extension = Path.GetExtension(name);
+
+        if (extension == ".bffnt")
+        {
+            alignment = Math.Max(alignment, BigEndian ? 0x2000 : 0x1000);
+        }
+        else if (extension is ".sharc" or ".sharcb")
+        {
+            alignment = Math.Max(alignment, 0x1000);
+        }
+
+        return Math.Max(alignment, HeaderAlignment(data));
+    }
+
+    private static int HeaderAlignment(ReadOnlySpan<byte> data)
+    {
+        if (data.Length <= 0x20 || data[0x0E] > 16)
+        {
+            return 1;
+        }
+
+        bool big = BinaryPrimitives.ReadUInt16LittleEndian(data[0x0C..]) != Bom;
+        Reader r = new(data, big);
+
+        if (r.U32(0x1C) != data.Length)
+        {
+            return 1;
+        }
+
+        return 1 << data[0x0E];
+    }
+
     private static int ObservedAlignment(int start)
     {
         const int Limit = 0x2000;
@@ -212,6 +385,22 @@ public sealed class SarcFile
         {
             if (_big) BinaryPrimitives.WriteUInt32BigEndian(_data[at..], value);
             else BinaryPrimitives.WriteUInt32LittleEndian(_data[at..], value);
+        }
+    }
+
+    private sealed class EntryStream(SarcFile owner, string name) : MemoryStream
+    {
+        private bool _stored;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && !_stored)
+            {
+                _stored = true;
+                owner.Set(name, ToArray());
+            }
+
+            base.Dispose(disposing);
         }
     }
 }
